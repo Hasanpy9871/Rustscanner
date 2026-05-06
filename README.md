@@ -83,3 +83,37 @@ MySQL	vulners, mysql-info
 SMB	vulners, smb-vuln-*
 RDP	vulners, rdp-vuln-ms12-020
 VNC	vulners, vnc-info
+
+
+Example Output
+
+╔══════════════════════════════════════════════════════════════════╗
+║                     RUSTSCANNER v2.0                            ║
+║              Professional Network Scanner with NSE              ║
+╚══════════════════════════════════════════════════════════════════╝
+
+[*] Target: 192.168.1.1
+[*] Ports to scan: 14 ports
+
+[*] Scanning 14 ports on 192.168.1.1...
+    Port 22 (ssh) is OPEN
+    Port 80 (http) is OPEN
+    Port 443 (https) is OPEN
+
+[*] Running NSE vulnerability scripts...
+  ▶ Running vulners on port 22... [INFO]
+  ▶ Running vulners on port 80... [HIGH]
+
+✓ Scan completed
+✓ Open ports: 3
+✓ Vulnerabilities found: 2 (High: 1)
+
+Disclaimer
+
+This tool is for authorized security testing and educational purposes only. Unauthorized scanning of networks or systems you do not own or have explicit permission to test is illegal. Use responsibly.
+
+License: MIT License
+
+Author: Hasan Ali
+
+GitHub: Hasanpy9871
