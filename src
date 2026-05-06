@@ -1,1 +1,543 @@
+//! RUSTSCANNER v2.0 - Professional Network Scanner
+//! With Full Nmap NSE Integration
 
+use colored::*;
+use serde::{Serialize, Deserialize};
+use std::net::{TcpStream, SocketAddr};
+use std::time::Duration;
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::fs::File;
+use std::io::Write;
+use chrono;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ScanResult {
+    port: u16,
+    state: String,
+    service: String,
+    version: String,
+    nse_results: Vec<NseResult>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct NseResult {
+    script_name: String,
+    output: String,
+    risk_level: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ScanReport {
+    target: String,
+    timestamp: String,
+    open_ports: Vec<ScanResult>,
+    nse_summary: Vec<NseResult>,
+}
+
+impl ScanReport {
+    fn new(target: String) -> Self {
+        ScanReport {
+            target,
+            timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            open_ports: Vec::new(),
+            nse_summary: Vec::new(),
+        }
+    }
+}
+
+fn print_banner() {
+    println!();
+    println!("{}", "╔════════════════════════════════════════════════════════════════════════════════╗".cyan().bold());
+    println!("{}", "║                           RUSTSCANNER v2.0                                      ║".cyan().bold());
+    println!("{}", "║                    Professional Network Scanner with NSE                        ║".cyan().bold());
+    println!("{}", "╚════════════════════════════════════════════════════════════════════════════════╝".cyan().bold());
+    println!();
+}
+
+fn check_nmap() -> bool {
+    match Command::new("nmap").arg("--version").output() {
+        Ok(output) => {
+            if output.status.success() {
+                let version = String::from_utf8_lossy(&output.stdout);
+                let first_line = version.lines().next().unwrap_or("Nmap installed");
+                println!("{}", format!("✓ Nmap found: {}", first_line).green());
+                true
+            } else {
+                println!("{}", "✗ Nmap not found - Install with: sudo apt install nmap".yellow());
+                false
+            }
+        }
+        Err(_) => {
+            println!("{}", "✗ Nmap not found - Install with: sudo apt install nmap".yellow());
+            false
+        }
+    }
+}
+
+fn scan_port(target: &str, port: u16, timeout: u64) -> bool {
+    let addr = format!("{}:{}", target, port);
+    if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
+        TcpStream::connect_timeout(&socket_addr, Duration::from_millis(timeout)).is_ok()
+    } else {
+        false
+    }
+}
+
+fn get_service_name(port: u16) -> String {
+    match port {
+        20 => "ftp-data".to_string(),
+        21 => "ftp".to_string(),
+        22 => "ssh".to_string(),
+        23 => "telnet".to_string(),
+        25 => "smtp".to_string(),
+        53 => "dns".to_string(),
+        80 => "http".to_string(),
+        110 => "pop3".to_string(),
+        111 => "rpcbind".to_string(),
+        135 => "msrpc".to_string(),
+        139 => "netbios-ssn".to_string(),
+        143 => "imap".to_string(),
+        443 => "https".to_string(),
+        445 => "microsoft-ds".to_string(),
+        993 => "imaps".to_string(),
+        995 => "pop3s".to_string(),
+        1433 => "mssql".to_string(),
+        3306 => "mysql".to_string(),
+        3389 => "rdp".to_string(),
+        5432 => "postgresql".to_string(),
+        5900 => "vnc".to_string(),
+        6379 => "redis".to_string(),
+        8080 => "http-proxy".to_string(),
+        27017 => "mongodb".to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn run_nse_script(target: &str, port: u16, script_name: &str) -> Option<NseResult> {
+    let output = Command::new("nmap")
+        .args([
+            "-p", &port.to_string(),
+            "--script", script_name,
+            "-sV", "--script-timeout", "30s",
+            "-oN", "-",
+            target
+        ])
+        .output();
+    
+    match output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let full_output = format!("{}{}", stdout, stderr);
+            
+            let risk_level = if full_output.contains("VULNERABLE") || full_output.contains("CVE-") {
+                "HIGH".to_string()
+            } else if full_output.contains("WARNING") || full_output.contains("possible") {
+                "MEDIUM".to_string()
+            } else if !full_output.is_empty() {
+                "INFO".to_string()
+            } else {
+                "NONE".to_string()
+            };
+            
+            if !full_output.is_empty() {
+                Some(NseResult {
+                    script_name: script_name.to_string(),
+                    output: full_output,
+                    risk_level,
+                })
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+fn run_all_nse_scripts(target: &str, ports: &[ScanResult]) -> Vec<NseResult> {
+    let mut all_results = Vec::new();
+    
+    println!("{}", "[*] Running NSE vulnerability scripts...".yellow());
+    
+    for port in ports {
+        let script_names = match port.service.as_str() {
+            "http" | "https" => {
+                if port.port == 80 || port.port == 443 {
+                    vec!["vulners", "http-enum", "http-title", "http-headers"]
+                } else {
+                    vec!["vulners", "http-enum"]
+                }
+            }
+            "ssh" => vec!["vulners", "ssh-auth-methods", "ssh2-enum-algos"],
+            "ftp" => vec!["vulners", "ftp-anon"],
+            "mysql" => vec!["vulners", "mysql-info"],
+            "microsoft-ds" | "netbios-ssn" => vec!["vulners", "smb-vuln-*"],
+            "rdp" => vec!["vulners", "rdp-vuln-ms12-020"],
+            "vnc" => vec!["vulners", "vnc-info"],
+            _ => vec!["vulners"],
+        };
+        
+        for script_name in script_names {
+            print!("{}", format!("  ▶ Running {} on port {}...", script_name, port.port).dimmed());
+            if let Some(result) = run_nse_script(target, port.port, script_name) {
+                println!("{}", format!(" [{}]", result.risk_level).cyan());
+                all_results.push(result);
+            } else {
+                println!(" {}", "[No findings]".dimmed());
+            }
+        }
+    }
+    
+    all_results
+}
+
+fn run_nmap_deep_scan(target: &str, ports: &[ScanResult]) -> Vec<NseResult> {
+    let mut results = Vec::new();
+    
+    println!("{}", "[*] Running Nmap full vulnerability scan...".yellow());
+    
+    let port_str: Vec<String> = ports.iter().map(|p| p.port.to_string()).collect();
+    let ports_arg = port_str.join(",");
+    
+    if ports_arg.is_empty() {
+        println!("{}", "  No open ports found, skipping deep scan".dimmed());
+        return results;
+    }
+    
+    let output = Command::new("nmap")
+        .args([
+            "-p", &ports_arg,
+            "--script", "vulners,vuln,exploit,default,safe",
+            "-sV",
+            "--script-timeout", "60s",
+            "-oN", "-",
+            target
+        ])
+        .output();
+    
+    match output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let full_output = format!("{}{}", stdout, stderr);
+            
+            for line in full_output.lines() {
+                if line.contains("VULNERABLE") || line.contains("CVE-") {
+                    results.push(NseResult {
+                        script_name: "vulnerability".to_string(),
+                        output: line.to_string(),
+                        risk_level: "HIGH".to_string(),
+                    });
+                } else if line.contains("WARNING") {
+                    results.push(NseResult {
+                        script_name: "warning".to_string(),
+                        output: line.to_string(),
+                        risk_level: "MEDIUM".to_string(),
+                    });
+                }
+            }
+            
+            let nmap_file = format!("nmap_scan_{}.txt", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+            let mut file = File::create(&nmap_file).unwrap();
+            file.write_all(full_output.as_bytes()).unwrap();
+            println!("{}", format!("✓ Full Nmap scan saved: {}", nmap_file).green());
+        }
+        Err(e) => {
+            println!("{}", format!("  Error running Nmap: {}", e).red());
+        }
+    }
+    
+    results
+}
+
+fn scan_ports_multi(target: String, ports: Vec<u16>, timeout: u64) -> Vec<ScanResult> {
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = vec![];
+    
+    println!("{}", format!("[*] Scanning {} ports on {}...", ports.len(), target).yellow());
+    
+    for port in ports {
+        let target_clone = target.clone();
+        let results_clone = Arc::clone(&results);
+        
+        let handle = thread::spawn(move || {
+            if scan_port(&target_clone, port, timeout) {
+                let service = get_service_name(port);
+                println!("{}", format!("   Port {} ({}) is OPEN", port, service).green());
+                let result = ScanResult {
+                    port,
+                    state: "open".to_string(),
+                    service: service.clone(),
+                    version: "-".to_string(),
+                    nse_results: Vec::new(),
+                };
+                let mut results_guard = results_clone.lock().unwrap();
+                results_guard.push(result);
+            }
+        });
+        handles.push(handle);
+    }
+    
+    for handle in handles {
+        let _ = handle.join();
+    }
+    
+    let final_results = results.lock().unwrap().clone();
+    final_results
+}
+
+fn save_html_report(report: &ScanReport) -> String {
+    let filename = format!("rustscan_{}_{}.html",
+        report.target.replace(".", "_"),
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    );
+    
+    let mut ports_html = String::new();
+    for port in &report.open_ports {
+        let nse_summary: String = port.nse_results.iter()
+            .map(|r| format!("<div class='risk-{}'>{}</div>", 
+                match r.risk_level.as_str() {
+                    "HIGH" => "high",
+                    "MEDIUM" => "medium",
+                    _ => "info",
+                },
+                r.output))
+            .collect();
+        
+        ports_html.push_str(&format!("
+            <div class='port-card'>
+                <div class='port-header'>
+                    <span class='port-number'>📡 {}</span>
+                    <span class='service-name'>{}</span>
+                </div>
+                <div class='port-details'>
+                    <div class='nse-results'>{}</div>
+                </div>
+            </div>", port.port, port.service, nse_summary));
+    }
+    
+    let mut vulns_html = String::new();
+    for vuln in &report.nse_summary {
+        vulns_html.push_str(&format!("
+            <div class='vulnerability {}'>
+                <div class='vuln-name'> {}</div>
+                <div class='vuln-output'>{}</div>
+            </div>",
+            match vuln.risk_level.as_str() {
+                "HIGH" => "critical",
+                "MEDIUM" => "high",
+                _ => "info",
+            },
+            vuln.script_name,
+            vuln.output
+        ));
+    }
+    
+    let html_content = format!(r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>RustScanner Report - {target}</title>
+    <style>
+        body {{ font-family: monospace; background: #0a0e27; color: #00ffcc; padding: 20px; }}
+        .container {{ max-width: 1300px; margin: auto; }}
+        h1 {{ color: #00ffcc; border-left: 4px solid #00ffcc; padding-left: 20px; }}
+        h2 {{ color: #ff9933; margin-top: 30px; border-bottom: 1px solid #333; padding-bottom: 10px; }}
+        .stats {{ display: flex; gap: 20px; margin: 20px 0; }}
+        .stat-card {{ background: rgba(0,0,0,0.4); padding: 20px; border-radius: 12px; text-align: center; flex: 1; }}
+        .stat-number {{ font-size: 2em; color: #00ffcc; font-weight: bold; }}
+        .port-card {{ background: rgba(0,0,0,0.3); margin: 15px 0; border-radius: 8px; overflow: hidden; }}
+        .port-header {{ background: rgba(0,255,204,0.1); padding: 15px; font-weight: bold; }}
+        .port-number {{ color: #00ffcc; }}
+        .service-name {{ color: #ffcc00; margin-left: 15px; }}
+        .port-details {{ padding: 15px; }}
+        .vulnerability {{ background: rgba(0,0,0,0.3); margin: 10px 0; padding: 15px; border-radius: 8px; border-left: 4px solid #ff3366; }}
+        .critical {{ border-left-color: #ff0000; background: rgba(255,0,0,0.1); }}
+        .high {{ border-left-color: #ff6600; background: rgba(255,102,0,0.1); }}
+        .footer {{ text-align: center; padding: 30px; color: #666; margin-top: 40px; border-top: 1px solid #333; }}
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1> RustScanner v2.0 Security Report</h1>
+    
+    <div class="stats">
+        <div class="stat-card"><div class="stat-number">{target}</div><div>Target</div></div>
+        <div class="stat-card"><div class="stat-number">{ports_count}</div><div>Open Ports</div></div>
+        <div class="stat-card"><div class="stat-number">{vuln_count}</div><div>Vulnerabilities</div></div>
+    </div>
+    
+    <h2> Open Ports & NSE Results</h2>
+    {ports_html}
+    
+    <h2> Vulnerability Summary</h2>
+    {vulns_html}
+    
+    <div class="footer">
+        <p>Generated by RustScanner v2.0 | Powered by Nmap NSE</p>
+        <p> {timestamp}</p>
+    </div>
+</div>
+</body>
+</html>"#,
+        target = report.target,
+        ports_count = report.open_ports.len(),
+        vuln_count = report.nse_summary.len(),
+        ports_html = ports_html,
+        vulns_html = vulns_html,
+        timestamp = report.timestamp
+    );
+    
+    let mut file = File::create(&filename).unwrap();
+    file.write_all(html_content.as_bytes()).unwrap();
+    
+    println!("{}", format!("✓ HTML report saved: {}", filename).green());
+    filename
+}
+
+fn main() {
+    print_banner();
+    
+    let args: Vec<String> = std::env::args().collect();
+    
+    if args.len() < 3 {
+        println!("{}", "Usage: cargo run -- -t <target> [options]".yellow());
+        println!();
+        println!("Options:");
+        println!("  -t <target>     Target IP or domain");
+        println!("  -p <ports>      Ports to scan (comma-separated or range)");
+        println!("  --no-nse        Skip NSE scripts");
+        println!("  -o <format>     Output format (html, json, all)");
+        println!();
+        println!("Examples:");
+        println!("  cargo run -- -t 192.168.1.1");
+        println!("  cargo run -- -t scanme.nmap.org -p 22,80,443");
+        println!("  cargo run -- -t 192.168.1.1 --no-nse");
+        println!("  cargo run -- -t 192.168.1.1 -o html");
+        return;
+    }
+    
+    let mut target = String::new();
+    let mut ports_list: Vec<u16> = Vec::new();
+    let mut skip_nse = false;
+    let mut output_format = "terminal";
+    
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-t" => {
+                if i + 1 < args.len() {
+                    target = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            "-p" => {
+                if i + 1 < args.len() {
+                    for part in args[i + 1].split(',') {
+                        if let Ok(port) = part.parse::<u16>() {
+                            ports_list.push(port);
+                        } else if part.contains('-') {
+                            let range: Vec<&str> = part.split('-').collect();
+                            if range.len() == 2 {
+                                if let (Ok(start), Ok(end)) = (range[0].parse::<u16>(), range[1].parse::<u16>()) {
+                                    for port in start..=end {
+                                        ports_list.push(port);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            "--no-nse" => {
+                skip_nse = true;
+            }
+            "-o" => {
+                if i + 1 < args.len() {
+                    output_format = args[i + 1].as_str();
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    
+    if target.is_empty() {
+        println!("{}", "Error: No target specified".red());
+        return;
+    }
+    
+    println!("{}", format!("[*] Target: {}", target).cyan());
+    
+    if !skip_nse {
+        if !check_nmap() {
+            println!("{}", "Warning: Nmap not found, continuing without NSE scripts".yellow());
+            skip_nse = true;
+        }
+    }
+    
+    if ports_list.is_empty() {
+        ports_list = vec![21,22,23,25,53,80,111,139,443,445,3306,5432,5900,8080];
+        println!("{}", "[*] Using default common ports list".dimmed());
+    }
+    
+    println!("{}", format!("[*] Ports to scan: {} ports", ports_list.len()).cyan());
+    
+    let open_ports = scan_ports_multi(target.clone(), ports_list, 1000);
+    
+    if open_ports.is_empty() {
+        println!("{}", "No open ports found".yellow());
+        return;
+    }
+    
+    let mut report = ScanReport::new(target.clone());
+    report.open_ports = open_ports.clone();
+    
+    if !skip_nse {
+        let nse_results = run_all_nse_scripts(&target, &open_ports);
+        report.nse_summary = nse_results.clone();
+        
+        let deep_results = run_nmap_deep_scan(&target, &open_ports);
+        for result in deep_results {
+            report.nse_summary.push(result);
+        }
+    }
+    
+    for port in &mut report.open_ports {
+        port.nse_results = report.nse_summary
+            .iter()
+            .filter(|r| r.output.contains(&port.port.to_string()))
+            .cloned()
+            .collect();
+    }
+    
+    println!();
+    println!("{}", "╔════════════════════════════════════════════════════════════════════════════════╗".cyan().bold());
+    println!("{}", "                                SCAN COMPLETE                                      ".cyan().bold());
+    println!("{}", "╚════════════════════════════════════════════════════════════════════════════════╝".cyan().bold());
+    println!();
+    println!("{}", format!("✓ Target: {}", report.target).green());
+    println!("{}", format!("✓ Open ports: {}", report.open_ports.len()).green());
+    
+    if !skip_nse {
+        let high_risk = report.nse_summary.iter().filter(|r| r.risk_level == "HIGH").count();
+        println!("{}", format!("✓ Vulnerabilities found: {} (High: {})", report.nse_summary.len(), high_risk).green());
+    }
+    println!();
+    
+    if output_format == "html" || output_format == "all" {
+        save_html_report(&report);
+    }
+    
+    if output_format == "json" || output_format == "all" {
+        let json_file = format!("rustscan_{}.json", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+        let json_data = serde_json::to_string_pretty(&report).unwrap();
+        let mut file = File::create(&json_file).unwrap();
+        file.write_all(json_data.as_bytes()).unwrap();
+        println!("{}", format!("✓ JSON report saved: {}", json_file).green());
+    }
+}
