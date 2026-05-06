@@ -31,3 +31,55 @@ Professional Network Security Scanner with Nmap NSE Integration
 git clone https://github.com/Hasanpy9871/rustscanner.git
 cd rustscanner
 cargo build --release
+
+Usage
+Basic Scan (Default Ports)
+bash
+
+sudo ./target/release/rustscanner -t 192.168.1.1
+
+Scan Specific Ports
+bash
+
+sudo ./target/release/rustscanner -t 192.168.1.1 -p 22,80,443,3306
+
+Scan Port Range
+bash
+
+sudo ./target/release/rustscanner -t 192.168.1.1 -p 1-1000
+
+Full Vulnerability Scan with HTML Report
+bash
+
+sudo ./target/release/rustscanner -t 192.168.1.1 -o html
+
+Fast Scan (No NSE Scripts)
+bash
+
+sudo ./target/release/rustscanner -t 192.168.1.1 --no-nse
+
+Generate All Output Formats
+bash
+
+sudo ./target/release/rustscanner -t 192.168.1.1 -o all
+
+Command Line Options
+Option	Description
+-t	Target IP address or domain name
+-p	Ports to scan (comma-separated or range)
+-o	Output format: terminal, html, json, all
+--no-nse	Skip NSE scripts (faster scan)
+Output Files
+File	Format	Description
+rustscan_*.html	HTML	Professional visual report
+rustscan_*.json	JSON	Machine-readable data
+nmap_scan_*.txt	Text	Raw Nmap output
+NSE Scripts Used
+Service	Scripts
+HTTP/HTTPS	vulners, http-enum, http-title, http-headers
+SSH	vulners, ssh-auth-methods, ssh2-enum-algos
+FTP	vulners, ftp-anon
+MySQL	vulners, mysql-info
+SMB	vulners, smb-vuln-*
+RDP	vulners, rdp-vuln-ms12-020
+VNC	vulners, vnc-info
